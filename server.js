@@ -1,173 +1,178 @@
-/**
- * Express.js Backend for a Military Asset Management System.
- *
- * This server provides a RESTful API with CRUD (Create, Read, Update, Delete)
- * operations for military assets. It uses Mongoose to connect to a MongoDB database.
- *
- * To run this locally:
- * 1. Make sure you have Node.js and npm installed.
- * 2. Run 'npm install' to install dependencies (express, mongoose, cors, dotenv).
- * 3. Create a '.env' file in the root directory and add your MongoDB connection string:
- * MONGODB_URI=your_mongodb_connection_string
- * 4. Run 'node index.js' to start the server.
- *
- * This code is also configured for easy deployment to services like Render.
- */
+// --- Required Dependencies ---
+// Install these dependencies by running:
+// npm install express cors body-parser jsonwebtoken bcryptjs
 
-// Import required modules
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
-require('dotenv').config(); // Load environment variables from .env file
+const bodyParser = require('body-parser');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 // Initialize the Express app
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001; // Use Render's assigned port or 3001 locally
 
-// Middleware setup
-// Enable CORS for all routes to allow the frontend to access the API
-app.use(cors());
-// Parse incoming requests with JSON payloads
-app.use(express.json());
+// --- Configuration & Middleware ---
+// CORS for allowing cross-origin requests from the frontend
+const corsOptions = {
+  origin: process.env.CORS_ORIGIN || '*', // Set this to your Netlify URL in production
+  optionsSuccessStatus: 200,
+};
+app.use(cors(corsOptions));
 
-// --- MongoDB Connection ---
-// Check if the MONGODB_URI is set
-if (!process.env.MONGODB_URI) {
-    console.error('Error: MONGODB_URI environment variable is not set.');
-    process.exit(1); // Exit the process with an error code
-}
+// Body-parser middleware to handle JSON data in requests
+app.use(bodyParser.json());
 
-// Connect to the MongoDB database
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('Successfully connected to MongoDB.'))
-    .catch(err => console.error('Could not connect to MongoDB:', err));
+// A simple in-memory database for demonstration purposes.
+// In a real application, you would connect to a database like MongoDB.
+const users = [];
+const assets = {
+    inventory: [
+        { base: 'Fort Bravo', equipmentType: 'Rifle (M4)', openingBalance: 500, closingBalance: 480, assigned: 15, expended: 5, netMovement: -20 },
+        { base: 'Fort Alpha', equipmentType: 'Grenade (M67)', openingBalance: 1200, closingBalance: 1150, assigned: 0, expended: 50, netMovement: -50 },
+        { base: 'Naval Base Charlie', equipmentType: 'Night Vision Goggles', openingBalance: 150, closingBalance: 150, assigned: 0, expended: 0, netMovement: 0 },
+        { base: 'Airfield Delta', equipmentType: 'Aircraft (F-35)', openingBalance: 20, closingBalance: 20, assigned: 0, expended: 0, netMovement: 0 },
+    ],
+    purchases: [],
+    transfers: [],
+    assignments: [],
+    expenditures: [],
+};
 
-// --- Mongoose Schema and Model ---
-// Define the schema for an Asset
-const assetSchema = new mongoose.Schema({
-    // Name of the asset (e.g., "F-35 Lightning II")
-    name: {
-        type: String,
-        required: true,
-        trim: true
-    },
-    // Type of the asset (e.g., "aircraft", "vehicle", "ship")
-    type: {
-        type: String,
-        required: true,
-        trim: true
-    },
-    // Status of the asset (e.g., "operational", "maintenance", "deployed")
-    status: {
-        type: String,
-        required: true,
-        trim: true,
-        enum: ['operational', 'maintenance', 'deployed', 'decommissioned']
-    },
-    // Location of the asset (e.g., "Kandahar Airfield", "USS Gerald R. Ford")
-    location: {
-        type: String,
-        required: true,
-        trim: true
-    },
-    // Description of the asset
-    description: {
-        type: String,
-        required: false,
-        trim: true
-    },
-    // Date of creation (automatically set)
-    createdAt: {
-        type: Date,
-        default: Date.now
+// Secret key for JWT. This should be stored in an environment variable in a production app.
+const JWT_SECRET = process.env.JWT_SECRET || 'your_super_secret_jwt_key';
+
+// --- JWT Authentication Middleware ---
+// This function verifies the JWT token and adds user info to the request object.
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (token == null) {
+        return res.status(401).json({ message: 'Authentication token is required.' });
     }
-});
 
-// Create the Mongoose model from the schema
-const Asset = mongoose.model('Asset', assetSchema);
-
-// --- API Routes ---
-// Base route for the API, useful for a health check
-app.get('/', (req, res) => {
-    res.send('Military Asset System API is running.');
-});
-
-// GET all assets
-app.get('/api/assets', async (req, res) => {
-    try {
-        const assets = await Asset.find();
-        res.json(assets);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-// GET a single asset by ID
-app.get('/api/assets/:id', async (req, res) => {
-    try {
-        const asset = await Asset.findById(req.params.id);
-        if (!asset) {
-            return res.status(404).json({ message: 'Asset not found' });
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ message: 'Invalid or expired token.' });
         }
-        res.json(asset);
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-// POST a new asset
-app.post('/api/assets', async (req, res) => {
-    // Create a new Asset instance from the request body
-    const newAsset = new Asset({
-        name: req.body.name,
-        type: req.body.type,
-        status: req.body.status,
-        location: req.body.location,
-        description: req.body.description
+        req.user = user;
+        next();
     });
+};
+
+// --- Role-Based Access Control (RBAC) Middleware ---
+// This middleware checks if the user has the required role.
+const authorizeRole = (requiredRole) => (req, res, next) => {
+    if (req.user.role !== requiredRole) {
+        return res.status(403).json({ message: 'Forbidden: You do not have the required permissions.' });
+    }
+    next();
+};
+
+// --- API Endpoints ---
+
+// Home route
+app.get('/', (req, res) => {
+    res.send('Military Asset Management Backend is running!');
+});
+
+// --- Authentication Endpoints ---
+
+// POST /api/auth/signup
+// Handles user registration. In a real app, you would add a 'role' to the user.
+app.post('/api/auth/signup', async (req, res) => {
+    const { email, password } = req.body;
+
+    // Check if user already exists
+    if (users.find(user => user.email === email)) {
+        return res.status(409).json({ message: 'User with that email already exists.' });
+    }
 
     try {
-        // Save the new asset to the database
-        const savedAsset = await newAsset.save();
-        res.status(201).json(savedAsset); // Respond with 201 Created status
-    } catch (err) {
-        res.status(400).json({ message: err.message }); // Respond with 400 Bad Request on validation error
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = {
+            id: users.length + 1,
+            email,
+            password: hashedPassword,
+            role: 'logistics', // Default role for new users
+        };
+        users.push(newUser);
+        console.log('New user signed up:', newUser);
+
+        const token = jwt.sign({ id: newUser.id, email: newUser.email, role: newUser.role }, JWT_SECRET);
+        res.status(201).json({ message: 'Account created successfully!', token });
+
+    } catch (error) {
+        res.status(500).json({ message: 'Error creating user account.', error });
     }
 });
 
-// PUT (Update) an existing asset by ID
-app.put('/api/assets/:id', async (req, res) => {
+// POST /api/auth/login
+// Handles user login and returns a JWT token.
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    const user = users.find(u => u.email === email);
+
+    if (!user) {
+        return res.status(404).json({ message: 'User not found.' });
+    }
+
     try {
-        // Find the asset by ID and update it. The { new: true } option returns the updated document.
-        const updatedAsset = await Asset.findByIdAndUpdate(
-            req.params.id,
-            req.body,
-            { new: true, runValidators: true }
-        );
-        if (!updatedAsset) {
-            return res.status(404).json({ message: 'Asset not found' });
+        if (await bcrypt.compare(password, user.password)) {
+            const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET);
+            res.status(200).json({ message: 'Login successful!', token });
+        } else {
+            res.status(401).json({ message: 'Invalid credentials.' });
         }
-        res.json(updatedAsset);
-    } catch (err) {
-        res.status(400).json({ message: err.message });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error during login.' });
     }
 });
 
-// DELETE an asset by ID
-app.delete('/api/assets/:id', async (req, res) => {
-    try {
-        const deletedAsset = await Asset.findByIdAndDelete(req.params.id);
-        if (!deletedAsset) {
-            return res.status(404).json({ message: 'Asset not found' });
-        }
-        // Respond with a success message
-        res.json({ message: 'Asset successfully deleted' });
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
+// --- Asset Management Endpoints (Protected) ---
+
+// GET /api/assets/inventory
+// Get the current list of assets. Requires a valid token.
+app.get('/api/assets/inventory', authenticateToken, (req, res) => {
+    // This endpoint is accessible to all authenticated users
+    res.json(assets.inventory);
 });
 
-// --- Server Startup ---
+// POST /api/assets/purchase
+// Record a new asset purchase. Requires 'logistics' or 'admin' role.
+app.post('/api/assets/purchase', authenticateToken, authorizeRole('logistics'), (req, res) => {
+    const newPurchase = { ...req.body, id: Date.now() };
+    assets.purchases.push(newPurchase);
+    res.status(201).json({ message: 'Purchase recorded successfully!', data: newPurchase });
+});
+
+// POST /api/assets/transfer
+// Initiate a transfer of assets. Requires 'logistics' or 'admin' role.
+app.post('/api/assets/transfer', authenticateToken, authorizeRole('logistics'), (req, res) => {
+    const newTransfer = { ...req.body, id: Date.now() };
+    assets.transfers.push(newTransfer);
+    res.status(201).json({ message: 'Transfer initiated successfully!', data: newTransfer });
+});
+
+// POST /api/assets/assignment
+// Assign assets to personnel. Requires 'logistics' or 'admin' role.
+app.post('/api/assets/assignment', authenticateToken, authorizeRole('logistics'), (req, res) => {
+    const newAssignment = { ...req.body, id: Date.now() };
+    assets.assignments.push(newAssignment);
+    res.status(201).json({ message: 'Asset assigned successfully!', data: newAssignment });
+});
+
+// POST /api/assets/expenditure
+// Record an asset expenditure. Requires 'logistics' or 'admin' role.
+app.post('/api/assets/expenditure', authenticateToken, authorizeRole('logistics'), (req, res) => {
+    const newExpenditure = { ...req.body, id: Date.now() };
+    assets.expenditures.push(newExpenditure);
+    res.status(201).json({ message: 'Expenditure recorded successfully!', data: newExpenditure });
+});
+
+
+// --- Start the Server ---
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Backend server running on http://localhost:${PORT}`);
 });
